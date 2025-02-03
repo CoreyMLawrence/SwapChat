@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="theme-color" content="#1a1a1a" />
+    <title>Chat Interface</title>
+    <link rel="stylesheet" href="styles/main.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  </head>
+  <body>
+    <div class="container">
+      <header class="header">
+        <div id="headerContent">
+          <div class="select-container">
+            <select
+              id="modelSelect"
+              class="model-select"
+              onchange="handleModelChange(this.value)"
+            >
+              <option>Loading models...</option>
+            </select>
+            <i class="fas fa-chevron-down chevron-small"></i>
+          </div>
+          <button class="trash-button" onclick="clearContext()">
+            <i class="fas fa-trash"></i>
+          </button>
+        </div>
+      </header>
+
+      <main id="chatContext" class="chat-container">
+        <div class="chat-content">
+          <!-- Chat messages will be rendered here -->
+        </div>
+        <!-- event listener too resize chat container height to always match svh -->
+        <script>
+          window.addEventListener('resize', function () {
+            const chatContainer = document.getElementById('chatContext');
+
+            // Use visualViewport height when available for better accuracy
+            const viewportHeight =
+              window.visualViewport?.height || window.innerHeight;
+
+            chatContainer.style.height = `${viewportHeight * 0.9}px`;
+          });
+        </script>
+      </main>
+
+      <footer class="input-container">
+        <div class="input-group" id="dropZone">
+          <textarea
+            id="userMessage"
+            class="message-input"
+            placeholder="Message..."
+            autofocus
+          ></textarea>
+          <button id="send" class="btn" onclick="sendMessage()">
+            <i class="fas fa-arrow-up arrow"></i>
+          </button>
+        </div>
+        <script>
+          const messageInput = document.getElementById('userMessage');
+          const dropZone = document.getElementById('dropZone');
+
+          messageInput.addEventListener('input', function () {
+            this.style.height = 'auto';
+            this.style.height = `${this.scrollHeight}px`;
+          });
+
+          // Drag and drop functionality
+          dropZone.addEventListener('dragover', (event) => {
+            event.preventDefault();
+            dropZone.classList.add('drag-over');
+          });
+
+          dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('drag-over');
+          });
+
+          dropZone.addEventListener('drop', async (event) => {
+            event.preventDefault();
+            dropZone.classList.remove('drag-over');
+
+            const files = event.dataTransfer.files;
+            for (const file of files) {
+              if (file.type === 'text/plain') {
+                const text = await file.text();
+                addFileToContext(text);
+              }
+            }
+          });
+
+          function addFileToContext(text) {
+            const context = getContext();
+            context.messages.push({
+              role: 'user',
+              content: text,
+              timestamp: Date.now(),
+            });
+            sessionStorage.setItem('chatContext', JSON.stringify(context));
+          }
+        </script>
+      </footer>
+    </div>
+
+    <script>
+      // Set marked options for security
+      marked.setOptions({
+        headerIds: false,
+        mangle: false,
+        sanitize: true,
+      });
+
+      // Context handling
+      function initContext() {
+        if (!sessionStorage.getItem('chatContext')) {
+          sessionStorage.setItem(
+            'chatContext',
+            JSON.stringify({ messages: [] })
+          );
+        }
+        renderContext();
+        // Focus on the input field when the page loads
+        document.getElementById('userMessage').focus();
+      }
+
+      function getContext() {
+        return JSON.parse(
+          sessionStorage.getItem('chatContext') || '{"messages":[]}'
+        );
+      }
+
+      function updateContext(role, content) {
+        const context = getContext();
+        context.messages.push({
+          role,
+          content,
+          timestamp: Date.now(),
+        });
+        sessionStorage.setItem('chatContext', JSON.stringify(context));
+        renderContext();
+      }
+
+      function renderContext() {
+        const contextDiv = document.querySelector('.chat-content');
+        const context = getContext();
+
+        contextDiv.innerHTML = context.messages
+          .map(
+            (msg) => `
+          <div class="message ${msg.role}" data-timestamp="${msg.timestamp}">
+            <div class="message-content">
+              ${marked.parse(msg.content)}
+            </div>
+          </div>
+        `
+          )
+          .join('');
+
+        // Scroll to bottom
+        contextDiv.scrollTop = contextDiv.scrollHeight;
+      }
+
+      function clearContext() {
+        sessionStorage.removeItem('chatContext');
+        initContext();
+      }
+
+      async function sendMessage() {
+        const modelId = document.getElementById('modelSelect').value;
+        const userMessage = document.getElementById('userMessage').value;
+        const messageInput = document.getElementById('userMessage');
+
+        if (!userMessage.trim()) {
+          return;
+        }
+
+        // Add user message
+        updateContext('user', userMessage);
+
+        // Add thinking message with a unique ID
+        const thinkingId = Date.now();
+        appendThinkingMessage(thinkingId);
+
+        // Clear input
+        messageInput.value = '';
+
+        try {
+          const context = getContext();
+          const response = await fetch('/api/llm', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              modelId,
+              userMessage: JSON.stringify(context.messages),
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`Error: ${response.statusText}`);
+          }
+
+          const text = await response.text();
+
+          // Replace thinking message with actual response
+          replaceThinkingMessage(thinkingId, text);
+        } catch (error) {
+          // Replace thinking message with error
+          const errorMessage = cleanErrorResponse(error.message);
+          replaceThinkingMessage(thinkingId, `Error: ${errorMessage}`);
+
+          // Remove error message and previous user message after 1 second
+          setTimeout(() => {
+            removeErrorMessage(thinkingId);
+            messageInput.value = userMessage; // Load user's message back into input
+          }, 1000);
+        }
+      }
+
+      function appendThinkingMessage(id) {
+        const contextDiv = document.querySelector('.chat-content');
+        const thinkingDiv = document.createElement('div');
+        thinkingDiv.className = 'message thinking';
+        thinkingDiv.id = `thinking-${id}`;
+        thinkingDiv.innerHTML =
+          '<div class="message-content">Thinking...</div>';
+        contextDiv.appendChild(thinkingDiv);
+        contextDiv.scrollTop = contextDiv.scrollHeight;
+      }
+
+      function replaceThinkingMessage(id, content) {
+        const thinkingDiv = document.getElementById(`thinking-${id}`);
+        if (thinkingDiv) {
+          const newDiv = document.createElement('div');
+          newDiv.className = 'message assistant';
+          newDiv.innerHTML = `<div class="message-content">${marked.parse(
+            content
+          )}</div>`;
+          thinkingDiv.replaceWith(newDiv);
+        }
+        // Update context after replacement
+        const context = getContext();
+        context.messages.push({
+          role: 'assistant',
+          content: content,
+          timestamp: Date.now(),
+        });
+        sessionStorage.setItem('chatContext', JSON.stringify(context));
+      }
+
+      function removeErrorMessage(thinkingId) {
+        const contextDiv = document.querySelector('.chat-content');
+        const thinkingDiv = document.getElementById(`thinking-${thinkingId}`);
+        if (thinkingDiv) {
+          const userMessageDiv = thinkingDiv.previousElementSibling;
+          if (userMessageDiv && userMessageDiv.classList.contains('user')) {
+            userMessageDiv.remove();
+          }
+          thinkingDiv.remove();
+        }
+      }
+
+      // Load available models when page loads
+      async function loadModels() {
+        const select = document.getElementById('modelSelect');
+        select.innerHTML = '<option>Loading models...</option>';
+
+        try {
+          console.log('Fetching models...');
+          const response = await fetch('/api/models', {
+            headers: {
+              Accept: 'application/json',
+            },
+          });
+          console.log('Response:', response.status, response.statusText);
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          const models = await response.json();
+          console.log('Received models:', models);
+
+          select.innerHTML = ''; // Clear loading message
+
+          if (!Array.isArray(models) || models.length === 0) {
+            throw new Error('No models available');
+          }
+
+          models.forEach((model) => {
+            console.log('Processing model:', model);
+            const option = document.createElement('option');
+            option.value = model.id;
+            option.text = model.name;
+            select.add(option);
+          });
+
+          // Set initial selection and update status
+          select.selectedIndex = 0;
+          handleModelChange(select.value);
+        } catch (error) {
+          console.error('Error loading models:', error);
+          select.innerHTML = `<option value="">Error: ${error.message}</option>`;
+        }
+      }
+
+      function handleModelChange(modelId) {
+        // Force unhover by removing focus
+        document.getElementById('modelSelect').blur();
+
+        // Scroll to bottom of chat
+        const chatContainer = document.querySelector('.chat-content');
+        chatContainer?.scrollTo(0, chatContainer.scrollHeight);
+      }
+
+      // Add enter key support for sending messages
+      document
+        .getElementById('userMessage')
+        .addEventListener('keypress', function (e) {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+          }
+        });
+
+      // Initialize context when page loads
+      initContext();
+      // Load models when page loads
+      loadModels();
+    </script>
+  </body>
+</html>
